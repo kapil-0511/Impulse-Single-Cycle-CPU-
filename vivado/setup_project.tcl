@@ -1,98 +1,110 @@
-# setup_project.tcl — Create Vivado project for ARIA-32
+# =============================================================================
+# setup_project.tcl  —  Impulse  |  Single-Cycle 32-bit CPU
+# =============================================================================
+# Creates the Vivado project with all RTL and testbench sources configured
+# and ready for simulation. Does NOT compile or run any simulations.
 #
-# Usage (Vivado Tcl console):
-#   source {C:/Users/kapily/Downloads/aria32/vivado/setup_project.tcl}
+# Vivado Tcl console:
+#   source C:/Users/kapily/Downloads/custom_cpu/vivado/setup_project.tcl
 #
-# RTL and TB files are discovered automatically via glob — no need to edit
-# this file when adding new .sv/.v files to rtl/ or tb/ directories.
-#
-# Change PART to match your FPGA:
-#   xc7a35tcpg236-1   — Arty A7-35
-#   xc7a100tcsg324-1  — Arty A7-100
-#   xc7z020clg484-1   — Zynq-7020 (ZedBoard / PYNQ)
-#   xc7k325tffg900-2  — Kintex-7
+# Then simulate any TB manually:
+#   set_property top tb_cpu [get_filesets sim_1]
+#   launch_simulation
+#   run all
+#   close_simulation
+# =============================================================================
 
-set PART      xc7a35tcpg236-1
-set PROJ_DIR  C:/Users/kapily/Downloads/aria32/vivado/project
-set PROJ_NAME aria32
-set RTL_DIR   C:/Users/kapily/Downloads/aria32/rtl
-set TB_DIR    C:/Users/kapily/Downloads/aria32/tb
+set script_dir [file dirname [file normalize [info script]]]
+set rtl_dir    [file normalize [file join $script_dir .. rtl]]
+set tb_dir     [file normalize [file join $script_dir .. tb]]
 
-# ============================================================================
-# 1. Create project
-# ============================================================================
-create_project $PROJ_NAME $PROJ_DIR -part $PART -force
-set_property target_language    Verilog [current_project]
-set_property simulator_language Mixed   [current_project]
+puts ""
+puts "==================================================================="
+puts "  Impulse  |  Single-Cycle CPU  |  Project Setup"
+puts "==================================================================="
 
-# ============================================================================
-# 2. RTL sources → sources_1
-#    Glob all .v files, exclude defines.v (header — resolved via include_dirs)
-# ============================================================================
-set rtl_files [glob -nocomplain -directory $RTL_DIR *.v]
-set rtl_files [lsearch -all -inline -not $rtl_files *defines.v]
-
-if {[llength $rtl_files] == 0} {
-    error "No RTL .v files found in $RTL_DIR"
+# ── Detect simulator ──────────────────────────────────────────────────────────
+if {[info commands create_project] ne ""} {
+    set SIM_TOOL "vivado"
+} elseif {[info commands vlib] ne ""} {
+    set SIM_TOOL "modelsim"
+} else {
+    puts "\[ERROR\]  Cannot detect simulator (neither create_project nor vlib found)."
+    puts "         Source this script from Vivado's Tcl console or ModelSim/Questa."
+    return
 }
-add_files -fileset sources_1 -norecurse $rtl_files
-set_property include_dirs $RTL_DIR [get_filesets sources_1]
-update_compile_order -fileset sources_1
-set_property top cpu_top [get_filesets sources_1]
 
-puts "  RTL files added ([llength $rtl_files]):"
-foreach f $rtl_files { puts "    [file tail $f]" }
+puts "\[INFO\]  Simulator : $SIM_TOOL"
+puts "\[INFO\]  RTL dir   : $rtl_dir"
+puts "\[INFO\]  TB dir    : $tb_dir"
+puts ""
 
-# ============================================================================
-# 3. Simulation sources → sim_1
-#    Glob all tb_*.sv files — any new testbench is picked up automatically
-# ============================================================================
-set_property include_dirs $RTL_DIR [get_filesets sim_1]
+# =============================================================================
+# ── VIVADO ────────────────────────────────────────────────────────────────────
+# =============================================================================
+if {$SIM_TOOL eq "vivado"} {
 
-set tb_files [glob -nocomplain -directory $TB_DIR tb_*.sv]
+    set proj_dir [file normalize [file join $script_dir project]]
 
-if {[llength $tb_files] == 0} {
-    error "No tb_*.sv files found in $TB_DIR"
-}
-add_files -fileset sim_1 -norecurse $tb_files
+    create_project -force impulse $proj_dir -part xc7a35tcpg236-1
 
-update_compile_order -fileset sim_1
+    set_property simulator_language Mixed         [current_project]
+    set_property target_language   Verilog        [current_project]
+    set_property default_lib       xil_defaultlib [current_project]
 
-# Set top AFTER update_compile_order
-set_property top     tb_cpu [get_filesets sim_1]
-set_property top_lib work   [get_filesets sim_1]
+    # ── RTL sources ───────────────────────────────────────────────────────────
+    set rtl_files [glob -nocomplain -directory $rtl_dir *.v]
 
-set_property -name {xsim.elaborate.xelab.more_options} \
-             -value {-debug all} -objects [get_filesets sim_1]
-
-puts "  TB files added ([llength $tb_files]):"
-foreach f $tb_files { puts "    [file tail $f]" }
-
-# ============================================================================
-# 4. Safety check — ensure no TB leaked into sources_1
-# ============================================================================
-foreach tb_file [get_files -of_objects [get_filesets sim_1]] {
-    set matched [get_files -of_objects [get_filesets sources_1] -quiet $tb_file]
-    if {$matched ne ""} {
-        puts "WARNING: [file tail $tb_file] found in sources_1 — removing"
-        remove_files -fileset sources_1 $matched
+    if {[llength $rtl_files] == 0} {
+        error "No RTL .v files found in $rtl_dir"
     }
+    add_files -fileset sources_1 -norecurse $rtl_files
+    # defines.v is `included by other files — must be added first, then marked
+    # as a header so Vivado skips standalone compilation of it.
+    set_property file_type {Verilog Header} [get_files */defines.v]
+    set_property include_dirs [list $rtl_dir] [get_filesets sources_1]
+    update_compile_order -fileset sources_1
+    set_property top cpu_top [get_filesets sources_1]
+    puts "\[INFO\]  RTL sources added ([llength $rtl_files] files)."
+
+    # ── Testbenches ───────────────────────────────────────────────────────────
+    set tb_files [list \
+        [file join $tb_dir tb_memcpy.sv    ] \
+        [file join $tb_dir tb_array_sum.sv ] \
+        [file join $tb_dir tb_minmax.sv    ] \
+        [file join $tb_dir tb_sort.sv      ] \
+        [file join $tb_dir tb_factorial.sv ] \
+        [file join $tb_dir tb_bitops.sv    ] \
+        [file join $tb_dir tb_gcd.sv       ] \
+        [file join $tb_dir tb_power.sv     ] \
+        [file join $tb_dir tb_isqrt.sv     ] \
+        [file join $tb_dir tb_collatz.sv   ] \
+        [file join $tb_dir tb_fibonacci.sv ] \
+        [file join $tb_dir tb_bsearch.sv   ] \
+        [file join $tb_dir tb_cpu.sv       ] \
+    ]
+    add_files -fileset sim_1 -norecurse $tb_files
+    # Filter by NAME =~ *.sv so we only touch the TB files, not the inherited
+    # RTL .v files that sim_1 also sees from sources_1.
+    set_property file_type SystemVerilog \
+        [get_files -of_objects [get_filesets sim_1] -filter {NAME =~ *.sv}]
+    set_property include_dirs [list $rtl_dir] [get_filesets sim_1]
+    set_property xsim.simulate.runtime "" [get_filesets sim_1]
+    set_property top     tb_cpu        [get_filesets sim_1]
+    set_property top_lib xil_defaultlib [get_filesets sim_1]
+    update_compile_order -fileset sim_1
+    puts "\[INFO\]  Testbenches added (13 files)."
+
+    puts ""
+    puts "==================================================================="
+    puts "  Impulse  |  Project ready (Vivado)."
+    puts "  To simulate, pick a TB top and launch from the GUI or Tcl:"
+    puts "    set_property top tb_cpu \[get_filesets sim_1\]"
+    puts "    launch_simulation"
+    puts "    run all"
+    puts "    close_simulation"
+    puts "==================================================================="
+
 }
 
-# ============================================================================
-# 5. Report
-# ============================================================================
 puts ""
-puts "========================================================"
-puts "  Project  : $PROJ_DIR/$PROJ_NAME.xpr"
-puts "  Syn top  : [get_property top [get_filesets sources_1]]"
-puts "  Sim top  : [get_property top [get_filesets sim_1]]"
-puts ""
-puts "  All TBs in sim_1:"
-foreach f [get_files -of_objects [get_filesets sim_1]] {
-    puts "    [file tail $f]"
-}
-puts ""
-puts "  Switch top:  set_property top <tb_name> \[get_filesets sim_1\]"
-puts "  Reload files (open project): source refresh_sim.tcl"
-puts "========================================================"
